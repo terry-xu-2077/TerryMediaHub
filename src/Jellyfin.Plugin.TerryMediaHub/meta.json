@@ -1,0 +1,14 @@
+{
+  "category": "General",
+  "changelog": "重命名为 TerryMediaHub；独立「在线媒体库」；逆向支持 csp jar 爬虫（多 jar 加载 + 容错回退 + SpiderApi 注入）",
+  "description": "把影视仓(TVBox 兼容)点播源解析成 Jellyfin 媒体库，自动过滤失效播放地址。",
+  "guid": "3f5c8a41-9d2e-4b76-8c15-6a0e7d94b2f1",
+  "name": "TerryMediaHub",
+  "overview": "影视仓/TVBox 源 -> 独立「在线媒体库」",
+  "owner": "terrymediahub",
+  "targetAbi": "10.10.0.0",
+  "version": "1.0.0.0",
+  "status": "Active",
+  "autoUpdate": false,
+  "assemblies": []
+}

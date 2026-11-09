@@ -1,0 +1,22 @@
+# 本地工具链与运行数据
+/tools/
+/data/
+/bin/
+/logs/
+/null/
+/.workbuddy/
+*.apk
+
+# 逆向资料（第三方 APK 的反编译产物，不随仓库发布）
+/src/reverse/
+/tests/fixtures/
+
+# 构建产物
+node_modules/
+**/obj/
+src/*/bin/
+__pycache__/
+*.pyc
+*.tmp
+*.part
+*.exe

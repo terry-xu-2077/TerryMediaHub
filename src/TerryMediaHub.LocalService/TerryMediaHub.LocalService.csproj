@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>TerryMediaHub.LocalService</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\TerryMediaHub.SourceCore\TerryMediaHub.SourceCore.csproj" />
+    <Content Include="Python\**\*.py" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="JavaScript\*.mjs" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="JavaScript\drpy2\*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="JavaScript\assets\*" CopyToOutputDirectory="PreserveNewest" />
+    <Reference Include="MediaBrowser.Model">
+      <HintPath>C:\Program Files\Jellyfin\Server\MediaBrowser.Model.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+</Project>

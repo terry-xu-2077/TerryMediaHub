@@ -1,0 +1,325 @@
+<div id="YscConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-checkbox">
+    <style>
+        #YscConfigPage .tmh-wrap { max-width: 920px; }
+        #YscConfigPage .tmh-intro { opacity: .72; margin: 4px 0 24px; }
+        #YscConfigPage .tmh-card { padding: 20px; margin: 0 0 16px; border: 1px solid rgba(255,255,255,.12); border-radius: 10px; background: rgba(255,255,255,.035); }
+        #YscConfigPage .tmh-card h3 { margin: 0 0 12px; }
+        #YscConfigPage .tmh-muted { opacity: .7; }
+        #YscConfigPage .tmh-sources { display: grid; gap: 10px; margin: 14px 0; }
+        #YscConfigPage .tmh-source { display: grid; grid-template-columns: minmax(130px,1fr) minmax(260px,3fr) auto auto; gap: 10px; align-items: center; }
+        #YscConfigPage .tmh-source input[type=text] { width: 100%; box-sizing: border-box; }
+        #YscConfigPage .tmh-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+        #YscConfigPage .tmh-feedback { min-height: 1.5em; margin-top: 12px; white-space: pre-wrap; }
+        #YscConfigPage .tmh-progress { height: 6px; margin: 10px 0; background: rgba(255,255,255,.13); border-radius: 4px; overflow: hidden; }
+        #YscConfigPage .tmh-progress div { height: 100%; width: 0; background: #00a4dc; transition: width .3s; }
+        #YscConfigPage .tmh-status { margin: 12px 0 0; line-height: 1.55; white-space: pre-wrap; }
+        #YscConfigPage #tmhUndo[hidden] { display: none !important; }
+        @media (max-width: 700px) {
+            #YscConfigPage .tmh-source { grid-template-columns: 1fr auto; }
+            #YscConfigPage .tmh-source .tmh-url { grid-column: 1 / -1; grid-row: 2; }
+        }
+    </style>
+
+    <div data-role="content">
+        <div class="content-primary tmh-wrap">
+            <h2 style="margin-bottom:0;">在线媒体</h2>
+            <p class="tmh-intro">管理影视源，按需同步内容并更新 Jellyfin 媒体库。</p>
+
+            <section class="tmh-card">
+                <h3>影视源</h3>
+                <p class="tmh-muted">添加影视仓 / TVBox 配置地址。修改后点击保存；同步使用已保存的地址。</p>
+                <div id="tmhSources" class="tmh-sources"></div>
+                <div class="tmh-actions">
+                    <button is="emby-button" type="button" class="raised" id="tmhAdd">添加地址</button>
+                    <button is="emby-button" type="button" class="raised" id="tmhCheck">检查地址</button>
+                    <button is="emby-button" type="button" class="raised button-submit" id="tmhSave">保存地址</button>
+                    <button is="emby-button" type="button" class="raised" id="tmhUndo" hidden>撤销移除</button>
+                </div>
+                <div id="tmhSourceMessage" class="tmh-feedback" role="status"></div>
+            </section>
+
+            <section class="tmh-card">
+                <h3>更新内容</h3>
+                <p class="tmh-muted">先同步数据，再重建媒体库。两步分开执行。</p>
+                <div class="tmh-actions">
+                    <button is="emby-button" type="button" class="raised button-submit" id="tmhSync">同步数据</button>
+                    <button is="emby-button" type="button" class="raised" id="tmhRebuild">重建媒体库</button>
+                    <button is="emby-button" type="button" class="raised" id="tmhHot">更新近期热播</button>
+                    <button is="emby-button" type="button" class="raised" id="tmhRatings">补全评分</button>
+                </div>
+                <div class="tmh-progress"><div id="tmhProgress"></div></div>
+                <div id="tmhSyncStatus" class="tmh-status">正在读取同步状态…</div>
+                <div id="tmhLibraryStatus" class="tmh-status tmh-muted"></div>
+                <div id="tmhRatingStatus" class="tmh-status tmh-muted"></div>
+                <div id="tmhActionMessage" class="tmh-feedback" role="status"></div>
+            </section>
+        </div>
+    </div>
+
+    <script>
+        (function () {
+            var id = '3f5c8a41-9d2e-4b76-8c15-6a0e7d94b2f1';
+            var cfg = null;
+            var timer = null;
+            var syncStarting = false;
+            var rebuildStarting = false;
+            var savedSources = [];
+            var removedSources = [];
+            var $ = function (name) { return document.getElementById(name); };
+
+            function api(path, options) {
+                var request = options || {};
+                request.url = ApiClient.getUrl(path);
+                request.dataType = 'json';
+                request.headers = request.headers || {};
+                request.headers.accept = 'application/json';
+                return ApiClient.ajax(request);
+            }
+
+            function post(path) {
+                return api(path, { type: 'POST', contentType: 'application/json', data: '{}' });
+            }
+
+            function errorText(error) { return error && error.message ? error.message : String(error); }
+            function sourceMessage(message) { $('tmhSourceMessage').textContent = message || ''; }
+            function actionMessage(message) { $('tmhActionMessage').textContent = message || ''; }
+
+            function collectSources() {
+                cfg.Sources = Array.from($('tmhSources').querySelectorAll('.tmh-source')).map(function (row) {
+                    return {
+                        Name: row.querySelector('.tmh-name').value.trim(),
+                        Url: row.querySelector('.tmh-url').value.trim(),
+                        Enabled: row.querySelector('.tmh-enabled').checked
+                    };
+                });
+            }
+
+            function renderSources() {
+                var box = $('tmhSources');
+                box.replaceChildren();
+                (cfg.Sources || []).forEach(function (source, index) {
+                    var row = document.createElement('div');
+                    row.className = 'tmh-source';
+                    var name = document.createElement('input');
+                    name.setAttribute('is', 'emby-input');
+                    name.className = 'tmh-name';
+                    name.type = 'text';
+                    name.placeholder = '名称';
+                    name.value = source.Name || '';
+                    var url = document.createElement('input');
+                    url.setAttribute('is', 'emby-input');
+                    url.className = 'tmh-url';
+                    url.type = 'text';
+                    url.placeholder = 'https://…/config.json';
+                    url.value = source.Url || '';
+                    var enabledLabel = document.createElement('label');
+                    enabledLabel.className = 'checkboxContainer';
+                    var enabled = document.createElement('input');
+                    enabled.setAttribute('is', 'emby-checkbox');
+                    enabled.className = 'tmh-enabled';
+                    enabled.type = 'checkbox';
+                    enabled.checked = source.Enabled !== false;
+                    var enabledText = document.createElement('span');
+                    enabledText.textContent = '启用';
+                    enabledLabel.append(enabled, enabledText);
+                    var remove = document.createElement('button');
+                    remove.setAttribute('is', 'emby-button');
+                    remove.type = 'button';
+                    remove.className = 'raised';
+                    remove.textContent = '移除';
+                    var removalArmed = false;
+                    remove.addEventListener('click', function () {
+                        if (!removalArmed) {
+                            removalArmed = true;
+                            remove.textContent = '确认移除';
+                            sourceMessage('再点一次“确认移除”才会从页面移除；之后仍需点击“保存地址”才会生效。');
+                            return;
+                        }
+                        collectSources();
+                        removedSources.push({ source: cfg.Sources[index], index: index });
+                        cfg.Sources.splice(index, 1);
+                        renderSources();
+                        $('tmhUndo').hidden = false;
+                        sourceMessage('地址尚未保存为删除。可点击“撤销移除”，或刷新页面恢复已保存的地址。');
+                    });
+                    row.append(name, url, enabledLabel, remove);
+                    row.addEventListener('input', function () { sourceMessage('有未保存的地址修改。'); });
+                    row.addEventListener('change', function () { sourceMessage('有未保存的地址修改。'); });
+                    box.appendChild(row);
+                });
+                if (!box.children.length) {
+                    var empty = document.createElement('p');
+                    empty.className = 'tmh-muted';
+                    empty.textContent = '还没有地址。';
+                    box.appendChild(empty);
+                }
+            }
+
+            function refreshStatus() {
+                return api('TerryMediaHub/Status').then(function (status) {
+                    var syncing = !!status.running;
+                    var rebuilding = !!status.libraryRunning;
+                    var rating = status.ratingEnrichment || {};
+                    $('tmhSync').disabled = syncing || syncStarting;
+                    $('tmhSync').textContent = syncing ? '同步中…' : (syncStarting ? '正在启动…' : '同步数据');
+                    $('tmhRebuild').disabled = rebuilding || rebuildStarting;
+                    $('tmhRebuild').textContent = rebuilding ? '重建中…' : (rebuildStarting ? '正在启动…' : '重建媒体库');
+                    $('tmhRatings').disabled = !!rating.running;
+                    $('tmhRatings').textContent = rating.running ? '补全中…' : '补全评分';
+                    $('tmhProgress').style.width = syncing ? (status.progress || 0) + '%' : '0';
+                    if (syncing) {
+                        $('tmhSyncStatus').textContent = '同步中 · ' + (status.progress || 0) + '% · ' + (status.phase || '准备中');
+                    } else if (!syncStarting) {
+                        $('tmhSyncStatus').textContent = status.lastSummary || '还没有同步过';
+                    }
+                    if (rebuilding) {
+                        $('tmhLibraryStatus').textContent = '正在重建媒体库…';
+                    } else if (!rebuildStarting) {
+                        $('tmhLibraryStatus').textContent = status.libraryLastSummary || '媒体库尚未重建';
+                    }
+                    $('tmhRatingStatus').textContent = rating.running
+                        ? ('正在补全评分：' + (rating.checkedCount || 0) + '/' + (rating.total || 0))
+                        : (rating.summary || '');
+                    if (status.sourceError) actionMessage('源地址读取失败：' + status.sourceError);
+                    if ((syncing || rebuilding || rating.running || syncStarting || rebuildStarting) && !timer) {
+                        timer = setInterval(refreshStatus, 3000);
+                    } else if (!syncing && !rebuilding && !rating.running && !syncStarting && !rebuildStarting && timer) {
+                        clearInterval(timer);
+                        timer = null;
+                    }
+                    return status;
+                }).catch(function (error) {
+                    actionMessage('读取状态失败：' + errorText(error));
+                });
+            }
+
+            $('tmhAdd').addEventListener('click', function () {
+                collectSources();
+                cfg.Sources.push({ Name: '', Url: '', Enabled: true });
+                renderSources();
+                sourceMessage('已添加空地址；点击“保存地址”后才会生效。');
+            });
+
+            $('tmhSave').addEventListener('click', function () {
+                collectSources();
+                var deletedSavedSources = savedSources.filter(function (oldSource) {
+                    return !cfg.Sources.some(function (current) { return current.Url === oldSource.Url; });
+                });
+                if (deletedSavedSources.length && !window.confirm('将从已保存配置中删除 ' + deletedSavedSources.length + ' 条源地址。确定保存吗？')) {
+                    sourceMessage('已取消保存；原来的源地址仍保留在 Jellyfin 配置中。');
+                    return;
+                }
+                var button = $('tmhSave');
+                button.disabled = true;
+                sourceMessage('正在保存…');
+                ApiClient.updatePluginConfiguration(id, cfg).then(function () {
+                    savedSources = cfg.Sources.map(function (source) { return Object.assign({}, source); });
+                    removedSources = [];
+                    $('tmhUndo').hidden = true;
+                    sourceMessage('地址已保存。');
+                    return refreshStatus();
+                }).catch(function (error) {
+                    sourceMessage('保存失败：' + errorText(error));
+                }).finally(function () { button.disabled = false; });
+            });
+
+            $('tmhUndo').addEventListener('click', function () {
+                if (!removedSources.length) return;
+                collectSources();
+                var last = removedSources.pop();
+                cfg.Sources.splice(Math.min(last.index, cfg.Sources.length), 0, last.source);
+                renderSources();
+                $('tmhUndo').hidden = !removedSources.length;
+                sourceMessage('已恢复这条地址；尚未保存。');
+            });
+
+            $('tmhCheck').addEventListener('click', function () {
+                collectSources();
+                var sources = cfg.Sources.filter(function (source) { return source.Enabled && source.Url; });
+                if (!sources.length) { sourceMessage('没有可检查的地址。'); return; }
+                var button = $('tmhCheck');
+                button.disabled = true;
+                sourceMessage('正在检查 ' + sources.length + ' 个地址…');
+                var results = [];
+                sources.reduce(function (chain, source) {
+                    return chain.then(function () {
+                        return api('TerryMediaHub/TestSource?url=' + encodeURIComponent(source.Url))
+                            .then(function (result) { results.push({ source: source, result: result }); })
+                            .catch(function (error) { results.push({ source: source, result: { ok: false, message: errorText(error) } }); });
+                    });
+                }, Promise.resolve()).then(function () {
+                    var failures = results.filter(function (item) { return !item.result.ok; });
+                    sourceMessage(failures.length
+                        ? ('可用 ' + (results.length - failures.length) + '/' + results.length + '；失败：\n' +
+                            failures.map(function (item) { return (item.source.Name || item.source.Url) + '：' + item.result.message; }).join('\n'))
+                        : ('全部 ' + results.length + ' 个地址可用。'));
+                }).finally(function () { button.disabled = false; });
+            });
+
+            $('tmhSync').addEventListener('click', function () {
+                if (syncStarting) return;
+                syncStarting = true;
+                $('tmhSync').disabled = true;
+                $('tmhSyncStatus').textContent = '正在启动同步…';
+                actionMessage('');
+                post('TerryMediaHub/Sync').then(function (result) {
+                    syncStarting = false;
+                    if (result && result.started === false) actionMessage(result.message || '已有同步任务在运行。');
+                    return refreshStatus();
+                }).catch(function (error) {
+                    syncStarting = false;
+                    actionMessage('启动同步失败：' + errorText(error));
+                    refreshStatus();
+                });
+            });
+
+            $('tmhRebuild').addEventListener('click', function () {
+                if (rebuildStarting) return;
+                rebuildStarting = true;
+                $('tmhRebuild').disabled = true;
+                $('tmhLibraryStatus').textContent = '正在启动媒体库重建…';
+                actionMessage('');
+                post('TerryMediaHub/RebuildLibrary').then(function (result) {
+                    rebuildStarting = false;
+                    if (result && result.started === false) actionMessage(result.message || '媒体库正在重建。');
+                    return refreshStatus();
+                }).catch(function (error) {
+                    rebuildStarting = false;
+                    actionMessage('启动重建失败：' + errorText(error));
+                    refreshStatus();
+                });
+            });
+
+            $('tmhHot').addEventListener('click', function () {
+                var button = $('tmhHot');
+                button.disabled = true;
+                actionMessage('正在更新近期热播…');
+                post('TerryMediaHub/RefreshDoubanHot').then(function (result) {
+                    actionMessage(result.updated ? ('近期热播已更新 ' + result.count + ' 部；请点击“重建媒体库”。')
+                        : (result.message || '更新未完成。'));
+                }).catch(function (error) {
+                    actionMessage('更新近期热播失败：' + errorText(error));
+                }).finally(function () { button.disabled = false; });
+            });
+
+            $('tmhRatings').addEventListener('click', function () {
+                $('tmhRatings').disabled = true;
+                actionMessage('正在启动评分补全…');
+                post('TerryMediaHub/EnrichRatings').then(refreshStatus).catch(function (error) {
+                    actionMessage('启动评分补全失败：' + errorText(error));
+                    $('tmhRatings').disabled = false;
+                });
+            });
+
+            ApiClient.getPluginConfiguration(id).then(function (configuration) {
+                cfg = configuration || {};
+                cfg.Sources = cfg.Sources || [];
+                savedSources = cfg.Sources.map(function (source) { return Object.assign({}, source); });
+                renderSources();
+                return refreshStatus();
+            }).catch(function (error) {
+                sourceMessage('加载配置失败：' + errorText(error));
+            });
+        })();
+    </script>
+</div>

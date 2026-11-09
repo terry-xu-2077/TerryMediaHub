@@ -1,0 +1,10 @@
+/*
+ * Decompiled with CFR 0.152.
+ */
+package android.graphics.drawable;
+
+public class ColorDrawable {
+    public ColorDrawable(int n) {
+    }
+}
+
