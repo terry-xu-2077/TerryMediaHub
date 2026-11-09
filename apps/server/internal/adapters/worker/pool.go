@@ -129,3 +129,20 @@ func (p *Pool) Close() {
 		h.Close()
 	}
 }
+
+// Prepare 让一个 JVM worker 预先转换全部 spider jar（新增订阅/新下载 jar 后调用）。
+func (p *Pool) Prepare(ctx context.Context) error {
+	h, err := p.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer p.Release(h)
+	if len(h.Command) > 0 {
+		return nil
+	}
+	old := h.Timeout
+	h.Timeout = 10 * time.Minute
+	defer func() { h.Timeout = old }()
+	_, err = h.Call(ctx, Request{Method: "prepare"})
+	return err
+}

@@ -129,13 +129,12 @@ func (h *Host) startLocked(ctx context.Context) error {
 		cmd = exec.Command(h.Command[0], h.Command[1:]...)
 		cmd.Env = append(os.Environ(), h.Env...)
 	} else {
-		cmd = exec.Command(h.Java,
-			"-Dfile.encoding=UTF-8",
-			"-Djava.awt.headless=true",
-			"-cp", h.HostJar,
-			"com.terry.spiderhost.Host",
-			h.SpiderDir, h.GlobalJar,
-		)
+		args := []string{"-Dfile.encoding=UTF-8", "-Djava.awt.headless=true", "-cp", h.HostJar,
+			"com.terry.spiderhost.Host", h.SpiderDir}
+		if h.GlobalJar != "" {
+			args = append(args, h.GlobalJar) // 为空则由 Host 自选最新的 spider jar
+		}
+		cmd = exec.Command(h.Java, args...)
 	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

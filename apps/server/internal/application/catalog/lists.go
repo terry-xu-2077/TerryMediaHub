@@ -295,19 +295,55 @@ func (s *Service) VerifyPlayable(ctx context.Context, items []MediaItem, want, m
 }
 
 // ranked 按健康度从高到低返回最多 limit 个当前可用的站点（停用站点会定期放行重试）。
+// 为了让新加入的订阅/站点有机会积累统计，约 1/4 的名额留给样本不足（<3 次）的站点，
+// 否则已验证的老站点会永远排在前面，新站点永远得不到评估。
 func (s *Service) ranked(limit int) []tvbox.Site {
-	keys := make([]string, len(s.sites))
-	byKey := make(map[string]tvbox.Site, len(s.sites))
-	for i, st := range s.sites {
+	all := s.sitesNow()
+	keys := make([]string, len(all))
+	byKey := make(map[string]tvbox.Site, len(all))
+	for i, st := range all {
 		keys[i] = st.Key
 		byKey[st.Key] = st
 	}
-	out := make([]tvbox.Site, 0, limit)
-	for _, k := range s.resolver.Health().Rank(keys) {
-		if len(out) >= limit {
-			break
+	h := s.resolver.Health()
+	order := h.Rank(keys)
+
+	explore := limit / 4
+	var fresh, proven []string
+	for _, k := range order {
+		if h.Samples(k) < 3 {
+			fresh = append(fresh, k)
+		} else {
+			proven = append(proven, k)
 		}
-		out = append(out, byKey[k])
+	}
+	// 探索名额：样本最少的优先；轮转起点随时间变化，使不同站点轮流获得机会。
+	if len(fresh) > explore {
+		off := int(time.Now().Unix()/60) % len(fresh)
+		fresh = append(fresh[off:], fresh[:off]...)
+	}
+	picked := make([]string, 0, limit)
+	seen := map[string]bool{}
+	take := func(list []string, max int) {
+		for _, k := range list {
+			if len(picked) >= limit || max == 0 {
+				return
+			}
+			if !seen[k] {
+				seen[k] = true
+				picked = append(picked, k)
+				max--
+			}
+		}
+	}
+	take(fresh, explore)
+	take(proven, limit)
+	take(fresh, limit) // 老站点不够时用新站点补满
+	out := make([]tvbox.Site, 0, len(picked))
+	for _, k := range order {
+		if seen[k] {
+			out = append(out, byKey[k])
+		}
 	}
 	return out
 }

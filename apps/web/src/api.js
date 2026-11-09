@@ -25,6 +25,12 @@ export const api = {
   removeHistory: (name) => req(`/api/history?name=${q(name)}`, { method: 'DELETE' }),
   status: () => req('/api/status'),
   refresh: () => post('/api/refresh', {}),
+  sources: () => req('/api/sources'),
+  addSource: (name, url) => post('/api/sources', { name, url }),
+  removeSource: (id) => req(`/api/sources?id=${q(id)}`, { method: 'DELETE' }),
+  toggleSource: (id, enabled) => post('/api/sources/toggle', { id, enabled }),
+  testSource: (url) => post('/api/sources/test', { url }),
+  reloadSources: () => post('/api/sources/reload', {}),
 }
 
 // 海报统一走后端缓存代理（绕过防盗链）

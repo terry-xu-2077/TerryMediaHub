@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -18,6 +17,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,6 +27,7 @@ import (
 	"terryhub/internal/application/catalog"
 	"terryhub/internal/application/ranking"
 	"terryhub/internal/application/refresher"
+	"terryhub/internal/application/subscriptions"
 	"terryhub/internal/assets"
 	"terryhub/internal/domain/tvbox"
 	"terryhub/internal/store"
@@ -54,15 +55,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 1. 订阅
-	log.Printf("[1/5] 加载订阅 %s", *sub)
-	cfg, err := loadSubscriptionCached(ctx, *sub, filepath.Join(*dataDir, "subscription.json"))
-	if err != nil {
-		return err
-	}
-	log.Printf("      站点 %d 个，解析接口 %d 个", len(cfg.Sites), len(cfg.Parses))
-
-	// 2. Java + 宿主 jar（内嵌，启动时释放）+ spider jar（按订阅下载）
+	// 1. Java + 宿主 jar（内嵌，启动时释放）
 	javaPath := *java
 	if javaPath == "" {
 		javaPath = findJava()
@@ -80,26 +73,12 @@ func run() error {
 	if err := os.WriteFile(hostPath, assets.HostRuntimeJar, 0o644); err != nil {
 		return err
 	}
-	log.Printf("[2/5] Java: %s", javaPath)
-	globalJar, err := sources.EnsureSpiderJars(ctx, cfg, jarDir, log.Printf)
-	if err != nil {
-		return err
-	}
+	log.Printf("[1/5] Java: %s", javaPath)
 
-	// 3. worker 池
+	// 2. 解析器：JAR(JVM) / 苹果CMS / Python / JS
 	const workerPoolSize = 6
-	log.Printf("[3/5] 启动 JVM worker 池（size=%d, global=%s）", workerPoolSize, globalJar)
-	pool := worker.NewPool(workerPoolSize, javaPath, hostPath, jarDir, globalJar)
-	if err := pool.Start(ctx); err != nil {
-		return err
-	}
+	pool := worker.NewPool(workerPoolSize, javaPath, hostPath, jarDir, "")
 	defer pool.Close()
-
-	// 4. 应用服务
-	st, err := store.Open(filepath.Join(*dataDir, "store"))
-	if err != nil {
-		return err
-	}
 	health := sources.NewHealth(filepath.Join(*dataDir, "store", "health.json"))
 	defer health.Flush()
 	jar := sources.NewPoolResolver(pool)
@@ -110,11 +89,43 @@ func run() error {
 	for _, c := range startScriptRuntimes(ctx, *dataDir, health, resolver) {
 		defer c()
 	}
-	catalogSvc := catalog.New(cfg, resolver)
-	log.Printf("[4/5] 可用 csp 站点 %d 个", catalogSvc.SiteCount())
+	log.Printf("[2/5] 解析器已注册")
+
+	// 3. 订阅源：加载全部启用的源 → 下载 spider jar → 合并站点
+	st, err := store.Open(filepath.Join(*dataDir, "store"))
+	if err != nil {
+		return err
+	}
+	catalogSvc := catalog.New(&tvbox.Config{}, resolver)
 	ranker := ranking.New()
 	catalogSvc.SetRanker(ranker)
-	rf := refresher.New(catalogSvc, st, ranker, *every)
+	var rf *refresher.Refresher
+	var poolReady atomic.Bool
+	mgr := subscriptions.NewManager(*dataDir, *sub, resolver.Supports,
+		func(cfg *tvbox.Config) { // 站点集合变化：热更新并触发一轮后台刷新
+			catalogSvc.SetConfig(cfg)
+			log.Printf("      订阅已加载：站点 %d 个（可用 %d 个）", len(cfg.Sites), catalogSvc.SiteCount())
+			if rf != nil {
+				rf.Trigger()
+			}
+		},
+		func(c context.Context) { // 新 jar 下载后预转换 dex
+			if poolReady.Load() {
+				if err := pool.Prepare(c); err != nil {
+					log.Printf("      jar 预转换失败: %v", err)
+				}
+			}
+		}, log.Printf)
+	log.Printf("[3/5] 加载订阅源（%d 个）", len(mgr.List()))
+	mgr.Reload(ctx)
+
+	// 4. JVM worker 池（先转换全部 dex，再起其余进程）
+	log.Printf("[4/5] 启动 JVM worker 池（size=%d）", workerPoolSize)
+	if err := pool.Start(ctx); err != nil {
+		return err
+	}
+	poolReady.Store(true)
+	rf = refresher.New(catalogSvc, st, ranker, *every)
 	go rf.Run(ctx)
 
 	// 5. HTTP
@@ -122,7 +133,7 @@ func run() error {
 	if *webDir != "" {
 		web = os.DirFS(*webDir)
 	}
-	srv := httpapi.New(catalogSvc, st, rf, web, filepath.Join(*dataDir, "imgcache"))
+	srv := httpapi.New(catalogSvc, st, rf, mgr, web, filepath.Join(*dataDir, "imgcache"))
 	httpServer := &http.Server{Addr: fmt.Sprintf(":%d", *port), Handler: srv.Handler()}
 	go func() {
 		<-ctx.Done()
@@ -166,31 +177,6 @@ func findJava() string {
 		}
 	}
 	return ""
-}
-
-// loadSubscriptionCached 拉取订阅（重试 3 次）；成功则缓存到本地，网络失败时回退到上次成功的缓存。
-func loadSubscriptionCached(ctx context.Context, url, cache string) (*tvbox.Config, error) {
-	var lastErr error
-	for i := 0; i < 3; i++ {
-		cfg, err := sources.LoadSubscription(ctx, url, "")
-		if err == nil {
-			if b, e := json.Marshal(cfg); e == nil {
-				_ = os.MkdirAll(filepath.Dir(cache), 0o755)
-				_ = os.WriteFile(cache, b, 0o644)
-			}
-			return cfg, nil
-		}
-		lastErr = err
-		time.Sleep(2 * time.Second)
-	}
-	if b, err := os.ReadFile(cache); err == nil {
-		var cfg tvbox.Config
-		if json.Unmarshal(b, &cfg) == nil && len(cfg.Sites) > 0 {
-			log.Printf("      订阅拉取失败（%v），使用本地缓存", lastErr)
-			return &cfg, nil
-		}
-	}
-	return nil, lastErr
 }
 
 // cleanTemp 清理上次异常退出遗留的转换临时文件。

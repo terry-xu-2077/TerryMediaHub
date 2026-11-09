@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"terryhub/internal/adapters/sources"
@@ -17,9 +18,8 @@ import (
 
 // Service 是媒体目录服务。
 type Service struct {
-	cfg      *tvbox.Config
 	resolver *sources.Router
-	sites    []tvbox.Site // 仅 csp 站点
+	state    atomic.Pointer[siteState] // 当前订阅配置与站点（可热更新）
 
 	// detailCache 缓存搜索阶段探测出的详情，点详情时直接复用，避免二次请求。
 	// key = site.Key + "|" + vodID，带 TTL（盗版源播放地址易过期，缓存不宜长）。
@@ -90,31 +90,51 @@ const mediaListTTL = 10 * time.Minute
 
 // New 构造服务。
 func New(cfg *tvbox.Config, resolver *sources.Router) *Service {
-	var sites []tvbox.Site
-	for _, s := range cfg.Sites {
-		// 只保留可搜索的 csp 影视站点：
-		//  - IsCsp：仅 jar 爬虫（js/py 站点 worker 不支持）
-		//  - Searchable != 0：排除明确标注不可搜索的站点（配置/弹幕/直播/教育类）
-		//  - CspClass 非空：无 spider 类的无法调用
-		if !resolver.Supports(s) || s.Key == "" || s.Name == "" {
-			continue
-		}
-		if s.Searchable != nil && *s.Searchable == 0 {
-			continue
-		}
-		if s.IsCsp() && s.CspClass() == "" {
-			continue
-		}
-		// 站点名黑名单：排除非影视站（弹幕配置/养生知识/学习课堂/网盘/磁力/合集/P2P 等），
-		// 这些站没有正常的影视分类与首页热播，会污染 home/category 聚合。
-		if isNonVideoSite(s.Name) {
-			continue
-		}
-		sites = append(sites, s)
+	s := &Service{resolver: resolver, detailCache: make(map[string]cachedDetail), searchCache: make(map[string]cachedSearch), classCache: make(map[string]cachedClass), lists: newTTL[[]MediaItem](mediaListTTL), playableCache: make(map[string]cachedPlayable)}
+	s.SetConfig(cfg)
+	return s
+}
+
+// siteState 是一份不可变的站点快照。
+type siteState struct {
+	cfg   *tvbox.Config
+	sites []tvbox.Site
+}
+
+func (s *Service) sitesNow() []tvbox.Site {
+	if st := s.state.Load(); st != nil {
+		return st.sites
 	}
-	// 订阅源里 key 可能重复（如两个「柠檬」站共用同一 spider 类 Nmvod，但站点
-	// 参数/api 不同）。key 被当作站点的唯一标识，重复会导致 findSite 定位错站点、
-	// 搜索结果与详情数据对不上。这里给重复 key 追加序号后缀，保证唯一。
+	return nil
+}
+
+// SetConfig 用（合并后的）订阅配置替换站点集合，并清空依赖站点的缓存。可在运行中调用。
+func (s *Service) SetConfig(cfg *tvbox.Config) {
+	if cfg == nil {
+		cfg = &tvbox.Config{}
+	}
+	var sites []tvbox.Site
+	for _, st := range cfg.Sites {
+		// 保留有对应解析器、可搜索的影视站点：
+		//  - Supports：csp / 苹果CMS / py / js（按 Router 注册情况）
+		//  - Searchable != 0：排除明确标注不可搜索的站点（配置/弹幕/直播/教育类）
+		if !s.resolver.Supports(st) || st.Key == "" || st.Name == "" {
+			continue
+		}
+		if st.Searchable != nil && *st.Searchable == 0 {
+			continue
+		}
+		if st.IsCsp() && st.CspClass() == "" {
+			continue
+		}
+		// 站点名黑名单：排除非影视站（弹幕配置/养生知识/学习课堂/网盘/磁力/合集/P2P 等）。
+		if isNonVideoSite(st.Name) {
+			continue
+		}
+		sites = append(sites, st)
+	}
+	// 订阅里 key 可能重复（如两个「柠檬」站共用同一 spider 类，但参数不同）。
+	// key 是站点唯一标识，重复会导致 findSite 定位错站点，这里给重复 key 追加序号后缀。
 	seen := make(map[string]int)
 	for i := range sites {
 		k := sites[i].Key
@@ -123,7 +143,15 @@ func New(cfg *tvbox.Config, resolver *sources.Router) *Service {
 		}
 		seen[k]++
 	}
-	return &Service{cfg: cfg, resolver: resolver, sites: sites, detailCache: make(map[string]cachedDetail), searchCache: make(map[string]cachedSearch), classCache: make(map[string]cachedClass), lists: newTTL[[]MediaItem](mediaListTTL), playableCache: make(map[string]cachedPlayable)}
+	s.state.Store(&siteState{cfg: cfg, sites: sites})
+
+	s.mu.Lock()
+	s.detailCache = make(map[string]cachedDetail)
+	s.searchCache = make(map[string]cachedSearch)
+	s.classCache = make(map[string]cachedClass)
+	s.playableCache = make(map[string]cachedPlayable)
+	s.mu.Unlock()
+	s.lists.Clear()
 }
 
 // isNonVideoSite 判断站点名是否为非影视站（弹幕配置/养生/学习/网盘/磁力/合集/P2P 等）。
@@ -144,12 +172,13 @@ func isNonVideoSite(name string) bool {
 }
 
 // SiteCount 返回可用 csp 站点数。
-func (s *Service) SiteCount() int { return len(s.sites) }
+func (s *Service) SiteCount() int { return len(s.sitesNow()) }
 
 // Sites 返回站点列表（key/name）。
 func (s *Service) Sites() []SiteInfo {
-	out := make([]SiteInfo, 0, len(s.sites))
-	for _, st := range s.sites {
+	sites := s.sitesNow()
+	out := make([]SiteInfo, 0, len(sites))
+	for _, st := range sites {
 		out = append(out, SiteInfo{Key: st.Key, Name: st.Name})
 	}
 	return out
@@ -593,7 +622,7 @@ func (s *Service) resolvePlay(ctx context.Context, site tvbox.Site, epURL, flag 
 	}
 
 	// 2. 退回通用解析（直链 + 订阅 parses）
-	url, err := sources.ResolvePlayURL(ctx, s.cfg, epURL)
+	url, err := sources.ResolvePlayURL(ctx, s.state.Load().cfg, epURL)
 	if err != nil {
 		return nil, err
 	}
@@ -601,9 +630,10 @@ func (s *Service) resolvePlay(ctx context.Context, site tvbox.Site, epURL, flag 
 }
 
 func (s *Service) findSite(key string) *tvbox.Site {
-	for i := range s.sites {
-		if s.sites[i].Key == key {
-			return &s.sites[i]
+	sites := s.sitesNow()
+	for i := range sites {
+		if sites[i].Key == key {
+			return &sites[i]
 		}
 	}
 	return nil

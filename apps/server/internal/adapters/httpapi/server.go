@@ -13,6 +13,7 @@ import (
 
 	"terryhub/internal/application/catalog"
 	"terryhub/internal/application/refresher"
+	"terryhub/internal/application/subscriptions"
 	"terryhub/internal/store"
 )
 
@@ -21,14 +22,15 @@ type Server struct {
 	catalog   *catalog.Service
 	store     *store.Store
 	refresher *refresher.Refresher
+	subs      *subscriptions.Manager
 	web       fs.FS // 前端静态资源（嵌入或磁盘）
 	imgDir    string
 	mux       *http.ServeMux
 }
 
 // New 构造 HTTP 服务。web 为前端静态文件系统，imgDir 为海报缓存目录。
-func New(c *catalog.Service, st *store.Store, rf *refresher.Refresher, web fs.FS, imgDir string) *Server {
-	s := &Server{catalog: c, store: st, refresher: rf, web: web, imgDir: imgDir, mux: http.NewServeMux()}
+func New(c *catalog.Service, st *store.Store, rf *refresher.Refresher, subs *subscriptions.Manager, web fs.FS, imgDir string) *Server {
+	s := &Server{catalog: c, store: st, refresher: rf, subs: subs, web: web, imgDir: imgDir, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -52,6 +54,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/history", s.handleHistory)
 	s.mux.HandleFunc("/api/status", s.handleStatus)
 	s.mux.HandleFunc("/api/refresh", s.handleRefresh)
+	s.mux.HandleFunc("/api/sources", s.handleSources)
+	s.mux.HandleFunc("/api/sources/test", s.handleSourceTest)
+	s.mux.HandleFunc("/api/sources/toggle", s.handleSourceToggle)
+	s.mux.HandleFunc("/api/sources/reload", s.handleSourceReload)
 	s.mux.Handle("/", s.spa())
 }
 

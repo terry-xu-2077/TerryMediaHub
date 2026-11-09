@@ -5,6 +5,7 @@ import Category from './pages/Category'
 import Search from './pages/Search'
 import Detail from './pages/Detail'
 import Library from './pages/Library'
+import Settings from './pages/Settings'
 
 const NAV = [
   ['/', '首页', true],
@@ -59,6 +60,9 @@ export default function App() {
           <span>⌕</span>
           <input ref={input} value={kw} onChange={(e) => setKw(e.target.value)} placeholder="搜索电影、剧集、综艺、动漫  ( / )" />
         </form>
+        <NavLink to="/settings" className={({ isActive }) => 'gear' + (isActive ? ' on' : '')} title="订阅源设置">
+          ⚙
+        </NavLink>
       </header>
       <main>
         <Routes>
@@ -66,6 +70,7 @@ export default function App() {
           <Route path="/category/:cat" element={<Category />} />
           <Route path="/library/:tab" element={<Library />} />
           <Route path="/search" element={<Search />} />
+          <Route path="/settings" element={<Settings />} />
           <Route path="/detail/:site/:id" element={<Detail />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

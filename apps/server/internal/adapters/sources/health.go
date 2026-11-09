@@ -188,3 +188,13 @@ func (h *Health) saveLocked(force bool) {
 		h.saved = time.Now()
 	}
 }
+
+// Samples 返回站点已记录的调用次数（未知站点为 0）。
+func (h *Health) Samples(key string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s := h.m[key]; s != nil {
+		return s.Samples
+	}
+	return 0
+}

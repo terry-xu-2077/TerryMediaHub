@@ -3,6 +3,7 @@ package tvbox
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 )
 
@@ -22,35 +23,35 @@ type Config struct {
 type Site struct {
 	Key         string          `json:"key"`         // 唯一标识
 	Name        string          `json:"name"`        // 显示名
-	Type        int             `json:"type"`        // 0=普通 1=字典 2=web 3=xml 4=jar(csp)
+	Type        FlexInt         `json:"type"`        // 0=普通 1=字典 2=web 3=xml 4=jar(csp)
 	Api         string          `json:"api"`         // csp_XXX / js / python / cms url
 	Ext         json.RawMessage `json:"ext"`         // 扩展参数：字符串或对象
 	Jar         string          `json:"jar"`         // 站点专用 jar（可选）
-	PlayerType  int             `json:"playerType"`  // 播放器类型
-	Searchable  *int            `json:"searchable"`  // 是否可搜索（0/1）
-	QuickSearch *int            `json:"quickSearch"` // 是否快速搜索
-	Filterable  *int            `json:"filterable"`
+	PlayerType  FlexInt         `json:"playerType"`  // 播放器类型
+	Searchable  *FlexInt        `json:"searchable"`  // 是否可搜索（0/1）
+	QuickSearch *FlexInt        `json:"quickSearch"` // 是否快速搜索
+	Filterable  *FlexInt        `json:"filterable"`
 	Categories  json.RawMessage `json:"categories"` // 指定分类：字符串或数组
 	Style       json.RawMessage `json:"style"`      // 样式对象
-	Timeout     int             `json:"timeout"`
-	Changeable  int             `json:"changeable"`
-	Playable    int             `json:"playable"`
+	Timeout     FlexInt         `json:"timeout"`
+	Changeable  FlexInt         `json:"changeable"`
+	Playable    FlexInt         `json:"playable"`
 }
 
 // Parse 是解析接口（换真链用）。
 type Parse struct {
 	Name string          `json:"name"`
-	Type int             `json:"type"`
+	Type FlexInt         `json:"type"`
 	Url  string          `json:"url"`
 	Ext  json.RawMessage `json:"ext"`
 }
 
 // Live 是直播源。
 type Live struct {
-	Name   string `json:"name"`
-	Type   int    `json:"type"`
-	Url    string `json:"url"`
-	Player int    `json:"playerType"`
+	Name   string  `json:"name"`
+	Type   FlexInt `json:"type"`
+	Url    string  `json:"url"`
+	Player int     `json:"playerType"`
 }
 
 // Icon 是站点图标。
@@ -95,12 +96,16 @@ const (
 	KindCMS   Kind = "cms"   // 苹果CMS v10 JSON/XML
 	KindPy    Kind = "py"    // Python 爬虫
 	KindJS    Kind = "js"    // JS 爬虫 / drpy2 规则
+	KindGuard Kind = "guard" // *Guard 类：依赖 DexNative 原生加固库(.so)，桌面 JVM 无法运行
 	KindOther Kind = "other" // 网盘/PHP/直播等，暂不支持
 )
 
 // Kind 判断站点类型。
 func (s Site) Kind() Kind {
 	if s.IsCsp() {
+		if strings.HasSuffix(s.Api, "Guard") {
+			return KindGuard
+		}
 		return KindCsp
 	}
 	path := s.Api
@@ -109,6 +114,8 @@ func (s Site) Kind() Kind {
 	}
 	lower := strings.ToLower(path)
 	switch {
+	case strings.Contains(lower, "drpy"): // drpy2 规则引擎：需要规则文件配合，暂不支持
+		return KindOther
 	case strings.HasSuffix(lower, ".py"):
 		return KindPy
 	case strings.HasSuffix(lower, ".js"):
@@ -118,4 +125,26 @@ func (s Site) Kind() Kind {
 		return KindCMS
 	}
 	return KindOther
+}
+
+// FlexInt 兼容 number / "123" / "" / true / null 的整型字段（TVBox 配置的字段类型很松散）。
+type FlexInt int
+
+func (f *FlexInt) UnmarshalJSON(b []byte) error {
+	t := strings.Trim(strings.TrimSpace(string(b)), `"`)
+	switch t {
+	case "", "null", "false":
+		*f = 0
+		return nil
+	case "true":
+		*f = 1
+		return nil
+	}
+	n, err := strconv.ParseFloat(t, 64)
+	if err != nil {
+		*f = 0 // 无法解析的值按 0 处理，不让整份订阅失败
+		return nil
+	}
+	*f = FlexInt(n)
+	return nil
 }

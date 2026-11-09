@@ -37,3 +37,10 @@ func (c *ttlCache[V]) Set(k string, v V) {
 	c.m[k] = ttlEntry[V]{v: v, at: time.Now()}
 	c.mu.Unlock()
 }
+
+// Clear 清空缓存。
+func (c *ttlCache[V]) Clear() {
+	c.mu.Lock()
+	c.m = make(map[string]ttlEntry[V])
+	c.mu.Unlock()
+}
